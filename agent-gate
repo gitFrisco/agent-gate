@@ -350,7 +350,7 @@ cmd_update() {
 #   agent-gate __complete WORD... CUR
 # WORDs are the words after 'agent-gate', CUR the (possibly empty) word under the cursor. Prints
 # a kind line, then the candidates already matched against CUR, one per line:
-#   words  insert a candidate as is (names that would need shell quoting are never offered)
+#   words  insert a candidate, quoted for the shell (they are raw, e.g. branch names)
 #   files  no candidates; the shell completes a file name
 #   dirs   no candidates; the shell completes a directory name
 #   none   no candidates; free text, e.g. 'land -m MSG'
@@ -360,9 +360,13 @@ cmd_completion() {    # the bash front end
   cat <<'EOF'
 # bash completion for agent-gate: everything comes from 'agent-gate __complete'.
 _agent_gate() {
-  local kind c; COMPREPLY=()
-  { IFS= read -r kind; while IFS= read -r c; do COMPREPLY+=("$c"); done; } \
-    < <(command agent-gate __complete "${COMP_WORDS[@]:1:COMP_CWORD}" 2>/dev/null)
+  # Candidates arrive raw and are quoted here, for this shell; the typed word is unquoted by
+  # dropping backslashes and an opening quote, never by eval (git forbids '\' in branch names).
+  local kind c cur=${COMP_WORDS[COMP_CWORD]}; COMPREPLY=()
+  cur=${cur//\\/}; cur=${cur#[\"\']}
+  { IFS= read -r kind
+    while IFS= read -r c; do printf -v c %q "$c"; COMPREPLY+=("$c"); done; } \
+    < <(command agent-gate __complete "${COMP_WORDS[@]:1:COMP_CWORD-1}" "$cur" 2>/dev/null)
   # compopt is bash 4+; on 3.2, 'dirs' and an unmatched 'words' fall back to file names.
   case $kind in
     dirs)       compopt -o dirnames 2>/dev/null;;
@@ -373,11 +377,11 @@ _agent_gate() {
 complete -o bashdefault -o default -F _agent_gate agent-gate
 EOF
 }
-# The bot's branches as of the last fetch, main excluded, skipping names a shell would need
-# quoted: git allows '$', '(' and backticks in branch names, and an agent chooses them.
+# The bot's branches as of the last fetch, main excluded. Raw names: git allows '$', '(' and
+# backticks in them, and an agent chooses them, so a front end MUST quote what it inserts.
 bot_branches() {
   git for-each-ref --format='%(refname:strip=3)' refs/remotes/bot/ 2>/dev/null \
-    | grep -xE '[A-Za-z0-9._/+-]+' | grep -vxE 'HEAD|main' || true
+    | grep -vxE 'HEAD|main' || true
 }
 cmd_complete() {
   (($#)) || set -- ""
