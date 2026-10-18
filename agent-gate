@@ -47,9 +47,10 @@ in that shell, 'claude' then '/web-setup'.
   agent-gate update
         Fast-forward the remembered clone from its origin and reinstall.
   agent-gate completion
-        Print the line that enables bash tab completion; the completion itself is
-        built into this script (install also writes the line where bash-completion
+        Print bash tab completion (install also writes it where bash-completion
         finds it). Manual use: eval "\$(agent-gate completion)" in ~/.bashrc.
+        It is a thin front end over 'agent-gate __complete WORD...', which other
+        shells can call the same way (see the script).
 EOF
 }
 
@@ -345,61 +346,68 @@ cmd_update() {
 }
 
 # ---------------------------------------------------------------- completion
-# Built in, as a self-completing command: 'complete -C agent-gate agent-gate' makes bash run this
-# script with COMP_LINE/COMP_POINT set, and it prints one candidate per line. The logic ships with
-# the script, so an installed copy can never disagree with its own completion.
-# Branch names come from the bot remote itself (bot_branches below), so a branch an agent pushed a
-# minute ago completes without a fetch first.
+# One entry point for every shell front end, which knows nothing about the commands:
+#   agent-gate __complete WORD... CUR
+# WORDs are the words after 'agent-gate', CUR the (possibly empty) word under the cursor. Prints
+# a kind line, then the candidates already matched against CUR, one per line:
+#   words  insert a candidate as is (names that would need shell quoting are never offered)
+#   files  no candidates; the shell completes a file name
+#   dirs   no candidates; the shell completes a directory name
+#   none   no candidates; free text, e.g. 'land -m MSG'
+# No network and no writes: branch names are bot's as of the last fetch ('review' fetches).
 COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
-cmd_completion() {
-  echo "complete -C agent-gate agent-gate"
-}
-# The bot's branches, one per line, main excluded. Asks the remote ('git ls-remote', never a
-# prompt: BatchMode, 3 s connect timeout) and caches the answer in the repository's git dir for
-# 60 s, so a burst of <Tab>s costs one round trip. Unreachable remote: the cache if any, else the
-# local refs/remotes/bot/* as of the last fetch.
-bot_branches() {
-  local gd cache list
-  gd=$(git rev-parse --git-dir 2>/dev/null) || return 0
-  cache=$gd/agent-gate-bot-branches
-  if [[ -z $(find "$cache" -mmin -1 2>/dev/null) ]] && list=$(
-       GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3" \
-       git ls-remote --heads bot 2>/dev/null); then
-    printf '%s\n' "$list" | sed 's|^.*refs/heads/||' >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
-  fi
-  if [[ -f $cache ]]; then cat "$cache"
-  else git for-each-ref --format='%(refname:strip=3)' refs/remotes/bot/ 2>/dev/null; fi \
-    | grep -vxE 'HEAD|main' || true
-}
-cmd_complete() {   # args as bash passes them to a -C completer: COMMAND WORD PREVIOUS
-  local line=${COMP_LINE:0:COMP_POINT}; local -a w
-  read -ra w <<<"$line"
-  [[ -z $line || $line == *[[:space:]] ]] && w+=("")
-  local n=$((${#w[@]} - 1)); local cur=${2-${w[n]}} cmd=${w[1]:-}
-  if ((n <= 1)); then
-    compgen -W "setup repo check review land env install update completion help --version" -- "$cur"
-    return 0
-  fi
-  case $cmd in
-    review|land)
-      case $cur in
-        -*) if [[ $cmd == review ]]; then compgen -W "-p --by-commit --" -- "$cur"
-            else compgen -W "-m --keep" -- "$cur"; fi;;
-        *)  local x; for x in "${w[@]:2:n-2}"; do
-              [[ $x == -- ]] && { compgen -f -- "$cur"; return 0; }
-            done
-            compgen -W "$(bot_branches)" -- "$cur";;
-      esac;;
-    setup)   compgen -W "--owner --bot --alias --key" -- "$cur";;
-    repo)    compgen -W "--public" -- "$cur";;
-    install) compgen -d -- "$cur";;
+cmd_completion() {    # the bash front end
+  cat <<'EOF'
+# bash completion for agent-gate: everything comes from 'agent-gate __complete'.
+_agent_gate() {
+  local kind c; COMPREPLY=()
+  { IFS= read -r kind; while IFS= read -r c; do COMPREPLY+=("$c"); done; } \
+    < <(command agent-gate __complete "${COMP_WORDS[@]:1:COMP_CWORD}" 2>/dev/null)
+  # compopt is bash 4+; on 3.2, 'dirs' and an unmatched 'words' fall back to file names.
+  case $kind in
+    dirs)       compopt -o dirnames 2>/dev/null;;
+    words|none) compopt +o default +o bashdefault 2>/dev/null;;
   esac
+  return 0
+}
+complete -o bashdefault -o default -F _agent_gate agent-gate
+EOF
+}
+# The bot's branches as of the last fetch, main excluded, skipping names a shell would need
+# quoted: git allows '$', '(' and backticks in branch names, and an agent chooses them.
+bot_branches() {
+  git for-each-ref --format='%(refname:strip=3)' refs/remotes/bot/ 2>/dev/null \
+    | grep -xE '[A-Za-z0-9._/+-]+' | grep -vxE 'HEAD|main' || true
+}
+cmd_complete() {
+  (($#)) || set -- ""
+  local cmd=$1 cur=${!#} prev="" kind=words c w; local -a cands=()
+  (($# > 1)) && prev=${@:$#-1:1}
+  if (($# == 1)); then
+    cands=(setup repo check review land env install update completion help --version)
+  else
+    for w in "${@:2:$#-2}"; do [[ $w == -- ]] && kind=files; done
+    case $cmd:$prev in
+      setup:--key) kind=files;;
+      setup:--owner|setup:--bot|setup:--alias|land:-m) kind=none;;
+    esac
+    [[ $kind == words ]] && case $cmd in
+      setup)   cands=(--owner --bot --alias --key);;
+      repo)    cands=(--public);;
+      install) kind=dirs;;
+      review|land)
+        if [[ $cur == -* ]]; then
+          if [[ $cmd == review ]]; then cands=(-p --by-commit --); else cands=(-m --keep); fi
+        else while IFS= read -r c; do cands+=("$c"); done < <(bot_branches); fi;;
+    esac
+  fi
+  printf '%s\n' "$kind"
+  [[ $kind == words ]] || return 0
+  for c in ${cands[@]+"${cands[@]}"}; do [[ $c == "$cur"* ]] && printf '%s\n' "$c"; done
   return 0
 }
 
 cmd_env() { load_conf; echo "export GH_CONFIG_DIR=$AG_GH_DIR"; }
-
-if [[ -n ${COMP_LINE+x} && -n ${COMP_POINT+x} ]]; then cmd_complete "$@" || true; exit 0; fi
 
 case ${1:-} in
   setup)  shift; cmd_setup "$@";;
@@ -411,6 +419,7 @@ case ${1:-} in
   install) shift; cmd_install "$@";;
   update)  shift; cmd_update "$@";;
   completion) shift; cmd_completion "$@";;
+  __complete) shift; cmd_complete "$@" 2>/dev/null || true;;
   -V|--version) echo "$VERSION";;
   ""|-h|--help|help) usage;;
   *) die "unknown command '$1' (see --help)";;

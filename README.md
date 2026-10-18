@@ -29,10 +29,12 @@ agent-gate check                                # verify identities and gate inv
 ```
 
 To upgrade later: `agent-gate update` fast-forwards the clone you installed from and reinstalls.
-Tab completion is built into the script (subcommands, options, and the bot's branch names for
-`review`/`land`): bash runs `agent-gate` itself to complete it. `install` registers it where
-bash-completion finds it, so it loads in new shells; without bash-completion, add
-`eval "$(agent-gate completion)"` to `~/.bashrc`.
+Tab completion covers subcommands, options, paths, and the bot's branch names for
+`review`/`land` (as of the last fetch). The script answers every query through one entry point,
+`agent-gate __complete`; the bash function `agent-gate completion` prints is only a front end, and
+other shells can use the same entry point. `install` puts the bash front end where bash-completion
+finds it, so it loads in new shells; without bash-completion, add `eval "$(agent-gate completion)"`
+to `~/.bashrc`.
 
 Then connect your agent **as the bot**. For Claude Code cloud sessions:
 
